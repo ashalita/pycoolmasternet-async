@@ -24,7 +24,7 @@ class ProtocolFormat(Enum):
 
     # An older protocol which is partially compatible with the Net variant,
     # supported models are 1000D, 2000S, 3000T, 4000M, 6000L, 7000F, 8000I(MH),
-    # 9000H and GG
+    # 9000H and CoolMaster G
     LEGACY = "legacy"
 
 class CoolMasterNet():
