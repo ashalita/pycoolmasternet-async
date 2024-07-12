@@ -1,8 +1,6 @@
 import asyncio
 import re
 
-from enum import Enum
-
 _MODES = ["auto", "cool", "dry", "fan", "heat"]
 
 _SWING_CHAR_TO_NAME = {
@@ -19,14 +17,6 @@ _SWING_NAME_TO_CHAR = {value: key for key, value in _SWING_CHAR_TO_NAME.items()}
 
 SWING_MODES = list(_SWING_CHAR_TO_NAME.values())
 
-class ProtocolFormat(Enum):
-    NET = "net"
-
-    # An older protocol which is partially compatible with the Net variant,
-    # supported models are 1000D, 2000S, 3000T, 4000M, 6000L, 7000F, 8000I(MH),
-    # 9000H and CoolMaster G
-    LEGACY = "legacy"
-
 class CoolMasterNet():
     """A connection to a coolmasternet bridge."""
     def __init__(self, host, port=10102, read_timeout=1, swing_support=False):
@@ -36,6 +26,7 @@ class CoolMasterNet():
         self._port = port
         self._read_timeout = read_timeout
         self._swing_support = swing_support
+        self._status_cmd = None
         self._concurrent_reads = asyncio.Semaphore(3)
 
     async def _make_request(self, request):
@@ -76,19 +67,37 @@ class CoolMasterNet():
         key_values = [re.split(r"\s*:\s*", line, 1) for line in lines]
         return dict(key_values)
 
+    async def _status(self, status_cmd=None, unit_id=None):
+        """Fetch the status of all units or a single one, falls back to legacy
+        format if necessary"""
+
+        if status_cmd is None:
+            cmds = ['ls2', 'stat2']
+        else:
+            cmds = [status_cmd]
+
+        for cmd in cmds:
+            try:
+                final_cmd = f"{cmd} {unit_id}" if unit_id is not None else cmd
+                status_lines = (await self._make_request(final_cmd)).strip().split("\r\n")
+                break
+            except ValueError:
+                continue
+        else:
+            raise Exception("failed to execute status commands")
+
+        return cmd, status_lines
+
     async def status(self):
         """Return a list of CoolMasterNetUnit objects with current status."""
-        try:
-            status_lines = (await self._make_request("ls2")).strip().split("\r\n")
-            line_format = ProtocolFormat.NET
-        except ValueError:
-            status_lines = (await self._make_request("stat2")).strip().split("\r\n")
-            line_format = ProtocolFormat.LEGACY
+
+        self._status_cmd, status_lines = await self._status(self._status_cmd)
+
         return {
             key: unit
             for unit, key in await asyncio.gather(
                 *(CoolMasterNetUnit.create(
-                    self, line.split(" ", 1)[0], line, line_format)
+                    self, line.split(" ", 1)[0], line, self._status_cmd)
                     for line in status_lines
                 )
             )
@@ -97,53 +106,38 @@ class CoolMasterNet():
 
 class CoolMasterNetUnit():
     """An immutable snapshot of a unit."""
-    def __init__(self, bridge, unit_id, raw, swing_raw, line_format):
+    def __init__(self, bridge, unit_id, raw, swing_raw, status_cmd):
         """Initialize a unit snapshot."""
         self._raw = raw
-        self._raw_format = line_format
+        self._status_cmd = status_cmd
         self._swing_raw = swing_raw
         self._unit_id = unit_id
         self._bridge = bridge
-        self._parse(line_format)
+        self._parse()
 
     @classmethod
-    async def create(cls, bridge, unit_id, raw=None, line_format=None):
-        if raw is None:
-            try:
-                raw = (await bridge._make_request(f"ls2 {unit_id}")).strip()
-                line_format = ProtocolFormat.NET
-            except ValueError:
-                raw = (await bridge._make_request(f"stat2 {unit_id}")).strip()
-                line_format = ProtocolFormat.LEGACY
+    async def create(cls, bridge, unit_id, raw=None, status_cmd=None):
+        if raw is None or status_cmd is None:
+            status_cmd, status_lines = await bridge._status(status_cmd, unit_id)
+            raw = status_lines[0]
         swing_raw = ((await bridge._make_request(f"query {unit_id} s")).strip() 
             if bridge._swing_support else "")
-        return CoolMasterNetUnit(bridge, unit_id, raw, swing_raw, line_format), unit_id
+        return CoolMasterNetUnit(bridge, unit_id, raw, swing_raw, status_cmd), unit_id
 
-    def _parse(self, line_format):
+    def _parse(self):
         fields = re.split(r"\s+", self._raw.strip())
 
-        if line_format == ProtocolFormat.NET:
-            expected_field_count = 9
-            temp_parser = float
-            clean_filter_sign = "#"
-        elif line_format == ProtocolFormat.LEGACY:
-            expected_field_count = 8
-            temp_parser = lambda s: float(s.replace(",", "."))
-            clean_filter_sign = "1"
-        else:
-            raise Exception(f"undefined line format {line_format}")
-
-        if len(fields) != expected_field_count:
+        if len(fields) not in (8, 9):
             raise ConnectionError("Unexpected status line format: " + str(fields))
 
         self._is_on = fields[1] == "ON"
         self._temperature_unit = "imperial" if fields[2][-1] == "F" else "celsius"
-        self._thermostat = temp_parser(fields[2][:-1])
-        self._temperature = temp_parser(fields[3][:-1])
+        self._thermostat = float(fields[2][:-1])
+        self._temperature = float(fields[3][:-1].replace(",", "."))
         self._fan_speed = fields[4].lower()
         self._mode = fields[5].lower()
         self._error_code = fields[6] if fields[6] != "OK" else None
-        self._clean_filter = fields[7] == clean_filter_sign
+        self._clean_filter = fields[7] in ("#", "1")
         self._swing = _SWING_CHAR_TO_NAME.get(self._swing_raw)
 
     async def _make_unit_request(self, request):
