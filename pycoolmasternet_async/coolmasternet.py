@@ -28,7 +28,6 @@ class CoolMasterNet():
         self._swing_support = swing_support
         self._status_cmd = None
         self._concurrent_reads = asyncio.Semaphore(3)
-        self._consume_initial_prompt = True
 
     async def _make_request(self, request):
         """Send a request to the CoolMasterNet and returns the response."""
@@ -37,24 +36,14 @@ class CoolMasterNet():
             reader, writer = await asyncio.open_connection(self._host, self._port)
 
             try:
-                if self._consume_initial_prompt:
-                    try:
-                        prompt = await asyncio.wait_for(reader.readuntil(b">"), self._read_timeout)
-                        if prompt != b">":
-                            raise ConnectionError("CoolMasterNet prompt not found")
-                    except TimeoutError:
-                        # some models don't return initial prompt, try forcing
-                        # one with a linefeed to see if the device is alive
-                        writer.write(("\n").encode("ascii"))
-                        prompt = await asyncio.wait_for(reader.readuntil(b">"), self._read_timeout)
-                        if prompt != b"\r\n>":
-                            raise ConnectionError("CoolMasterNet prompt not found")
-                        self._consume_initial_prompt = False
-
                 writer.write((request + "\n").encode("ascii"))
                 response = await asyncio.wait_for(reader.readuntil(b"\n>"), self._read_timeout)
 
                 data = response.decode("ascii")
+
+                if data.startswith(">"):
+                    data = data[1:]
+
                 if data.endswith("\n>"):
                     data = data[:-1]
 
