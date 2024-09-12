@@ -27,7 +27,7 @@ class CoolMasterNet():
         self._read_timeout = read_timeout
         self._swing_support = swing_support
         self._status_cmd = None
-        self._concurrent_reads = asyncio.Semaphore(3)
+        self._concurrent_reads = asyncio.Semaphore(1)
 
     async def _make_request(self, request):
         """Send a request to the CoolMasterNet and returns the response."""
@@ -144,7 +144,11 @@ class CoolMasterNetUnit():
 
     async def refresh(self):
         """Refresh the data from CoolMasterNet and return it as a new instance."""
-        return (await CoolMasterNetUnit.create(self._bridge, self._unit_id))[0]
+        return (await CoolMasterNetUnit.create(
+            self._bridge,
+            self._unit_id,
+            status_cmd=self._status_cmd
+        ))[0]
 
     @property
     def unit_id(self):
